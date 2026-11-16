@@ -62,6 +62,7 @@ class OrbitClient:
             starting_agent=self.create_agent(model),
             input=message,
             session=session,
+            max_turns=None,
         )
 
         async for event in result.stream_events():
