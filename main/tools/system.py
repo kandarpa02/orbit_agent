@@ -1,13 +1,10 @@
-
 from __future__ import annotations
 
 import asyncio
-import json
 import os
-import shlex
 import uuid
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 
@@ -20,47 +17,217 @@ from agents import FunctionTool
 # ============================================================
 
 WORKSPACE = Path(
-    os.getenv("ORBIT_WORKSPACE", "./workspace")
-).resolve()
+    os.getenv("ORBIT_WORKSPACE", ".cache/orbit/workspace")
+).expanduser().resolve()
 
 WORKSPACE.mkdir(parents=True, exist_ok=True)
 
+READ_ONLY_ROOTS = tuple(
+    Path(raw_path).expanduser().resolve()
+    for raw_path in os.getenv("ORBIT_READONLY_PATHS", "").split(os.pathsep)
+    if raw_path.strip()
+)
+
 MAX_FILE_SIZE = 2 * 1024 * 1024
 MAX_OUTPUT_SIZE = 20_000
-
-ALLOWED_COMMANDS = {
-    "python",
-    "python3",
-    "pytest",
-    "ruff",
-    "git",
-    "uv",
-    "pip",
-    "npm",
-    "node",
+SKIP_DIRECTORY_NAMES = {
+    ".git",
+    ".hg",
+    ".svn",
+    ".venv",
+    "venv",
+    "node_modules",
+    "__pycache__",
 }
 
+
 # ============================================================
-# FILESYSTEM
+# COMMAND ALLOWLIST
 # ============================================================
 
-def resolve_path(path: str) -> Path:
-    """Resolve a path and prevent access outside the workspace."""
+ALLOWED_COMMANDS = {
+    # Python
+    "python",
+    "python3",
+    "python3.12",
+    "pytest",
+    "ruff",
+    "mypy",
+    "pyright",
+    "black",
+    "isort",
+    "uv",
+    "pip",
+    "pip3",
+    "poetry",
+    "pdm",
+    "hatch",
 
-    candidate = Path(path)
+    # Version control
+    "git",
+
+    # JavaScript / TypeScript
+    "node",
+    "npm",
+    "npx",
+    "pnpm",
+    "yarn",
+    "bun",
+    "tsc",
+    "tsx",
+    "vite",
+    "next",
+
+    # Build tools
+    "make",
+    "cmake",
+    "cargo",
+    "rustc",
+    "go",
+    "javac",
+    "java",
+
+    # Shell utilities
+    "ls",
+    "dir",
+    "pwd",
+    "cd",
+    "cat",
+    "type",
+    "echo",
+    "head",
+    "tail",
+    "grep",
+    "find",
+    "which",
+    "where",
+    "tree",
+    "mkdir",
+    "touch",
+    "cp",
+    "mv",
+    "rm",
+    "rmdir",
+    "del",
+    "copy",
+    "move",
+
+    # System utilities
+    "whoami",
+    "hostname",
+    "uname",
+    "where.exe",
+    "tasklist",
+
+    # API / networking
+    "curl",
+    "wget",
+
+    # Containers
+    "docker",
+    "docker-compose",
+
+    # Database clients
+    "sqlite3",
+    "psql",
+    "redis-cli",
+
+    # Documentation
+    "mkdocs",
+    "sphinx-build",
+}
+
+
+# ============================================================
+# PATH / PERMISSION HELPERS
+# ============================================================
+
+def is_inside(path: Path, root: Path) -> bool:
+    """Return True when path is root or a descendant of root."""
+    try:
+        path.relative_to(root)
+        return True
+    except ValueError:
+        return False
+
+
+def readable_roots() -> tuple[Path, ...]:
+    """Roots available to read/search tools."""
+    # De-duplicate while preserving order.
+    roots: list[Path] = []
+    for root in (WORKSPACE, *READ_ONLY_ROOTS):
+        resolved = root.resolve()
+        if resolved not in roots:
+            roots.append(resolved)
+    return tuple(roots)
+
+
+def resolve_path(path: str, operation: Literal["read", "write"]) -> Path:
+    """
+    Resolve and authorize a path.
+
+    Read:
+        WORKSPACE and explicitly configured READ_ONLY_ROOTS.
+
+    Write:
+        WORKSPACE only.
+
+    Resolving symlinks before checking containment helps prevent a
+    symlink inside an allowed directory from pointing outside it.
+    """
+    if not path or not path.strip():
+        raise ValueError("Path cannot be empty.")
+
+    candidate = Path(path).expanduser()
 
     if not candidate.is_absolute():
         candidate = WORKSPACE / candidate
 
     resolved = candidate.resolve()
 
-    try:
-        resolved.relative_to(WORKSPACE)
-    except ValueError:
-        raise PermissionError("Access outside ORBIT workspace denied.")
+    if operation == "read":
+        allowed_roots = readable_roots()
+    elif operation == "write":
+        allowed_roots = (WORKSPACE.resolve(),)
+    else:
+        raise ValueError(f"Unsupported filesystem operation: {operation}")
+
+    if not any(is_inside(resolved, root) for root in allowed_roots):
+        if operation == "write":
+            raise PermissionError(
+                "Write access denied. ORBIT can only modify files inside "
+                f"its workspace: {WORKSPACE}"
+            )
+        raise PermissionError(
+            "Read access denied. The path is outside the workspace and "
+            "configured read-only roots."
+        )
 
     return resolved
 
+
+def relative_display_path(path: Path) -> str:
+    """Format a path relative to its matching allowed root."""
+    resolved = path.resolve()
+
+    for root in readable_roots():
+        if is_inside(resolved, root):
+            try:
+                relative = resolved.relative_to(root)
+                return f"{root.name or str(root)} / {relative}"
+            except ValueError:
+                pass
+
+    return str(resolved)
+
+
+def should_skip_path(path: Path) -> bool:
+    return any(part.lower() in SKIP_DIRECTORY_NAMES for part in path.parts)
+
+
+# ============================================================
+# FILESYSTEM ARGUMENT SCHEMAS
+# ============================================================
 
 class ReadFileArgs(BaseModel):
     path: str
@@ -83,23 +250,36 @@ class PatchFileArgs(BaseModel):
     new_text: str
 
 
+class ListDirectoryArgs(BaseModel):
+    path: str = "."
+
+
+# ============================================================
+# FILESYSTEM HANDLERS
+# ============================================================
+
 async def read_file(args: ReadFileArgs) -> str:
-    path = resolve_path(args.path)
+    path = resolve_path(args.path, operation="read")
 
     if not path.is_file():
         return f"File not found: {args.path}"
 
     if path.stat().st_size > MAX_FILE_SIZE:
-        return "File exceeds the 2 MB reading limit."
+        return f"File exceeds the {MAX_FILE_SIZE // (1024 * 1024)} MB reading limit."
 
-    return await asyncio.to_thread(
-        path.read_text,
-        encoding="utf-8",
-    )
+    try:
+        return await asyncio.to_thread(
+            path.read_text,
+            encoding="utf-8",
+        )
+    except UnicodeDecodeError:
+        return "File is not valid UTF-8 text and cannot be displayed."
+    except OSError as exc:
+        return f"Could not read file: {exc}"
 
 
 async def write_file(args: WriteFileArgs) -> str:
-    path = resolve_path(args.path)
+    path = resolve_path(args.path, operation="write")
 
     path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -113,51 +293,90 @@ async def write_file(args: WriteFileArgs) -> str:
 
 
 async def search_files(args: SearchFilesArgs) -> str:
-    results = []
+    """
+    Search file contents in the workspace and configured read-only roots.
+    Search never writes to any searched directory.
+    """
+    results: list[str] = []
+    query = args.query.casefold()
 
-    for path in WORKSPACE.glob(args.pattern):
-        if not path.is_file():
+    for root in readable_roots():
+        if not root.exists() or not root.is_dir():
             continue
+
+        for path in root.glob(args.pattern):
+            if len(results) >= args.max_results:
+                break
+
+            if should_skip_path(path) or not path.is_file():
+                continue
+
+            try:
+                if path.stat().st_size > MAX_FILE_SIZE:
+                    continue
+
+                content = await asyncio.to_thread(
+                    path.read_text,
+                    encoding="utf-8",
+                )
+
+                if query in content.casefold():
+                    results.append(relative_display_path(path))
+
+            except (UnicodeDecodeError, OSError, PermissionError):
+                continue
 
         if len(results) >= args.max_results:
             break
 
-        try:
-            if path.stat().st_size > MAX_FILE_SIZE:
-                continue
-
-            content = await asyncio.to_thread(
-                path.read_text,
-                encoding="utf-8",
-            )
-
-            if args.query.lower() in content.lower():
-                results.append(
-                    str(path.relative_to(WORKSPACE))
-                )
-
-        except (UnicodeDecodeError, OSError):
-            continue
-
     if not results:
-        return "No matching files found."
+        return "No matching files found in the workspace or configured read-only roots."
 
     return "\n".join(results)
 
 
+async def list_directory(args: ListDirectoryArgs) -> str:
+    path = resolve_path(args.path, operation="read")
+
+    if not path.exists():
+        return f"Directory not found: {args.path}"
+
+    if not path.is_dir():
+        return f"Not a directory: {args.path}"
+
+    try:
+        entries = await asyncio.to_thread(lambda: sorted(path.iterdir(), key=lambda p: (p.is_file(), p.name.lower())))
+    except OSError as exc:
+        return f"Could not list directory: {exc}"
+
+    lines: list[str] = []
+    for entry in entries:
+        if entry.name.lower() in SKIP_DIRECTORY_NAMES:
+            continue
+
+        kind = "[DIR] " if entry.is_dir() else "[FILE]"
+        lines.append(f"{kind} {entry.name}")
+
+    return "\n".join(lines) if lines else "Directory is empty."
+
+
 async def patch_file(args: PatchFileArgs) -> str:
-    path = resolve_path(args.path)
+    # Patching is a write operation and is therefore workspace-only.
+    path = resolve_path(args.path, operation="write")
 
     if not path.is_file():
         return "File not found."
 
     if path.stat().st_size > MAX_FILE_SIZE:
-        return "File exceeds the 2 MB patching limit."
+        return f"File exceeds the {MAX_FILE_SIZE // (1024 * 1024)} MB patching limit."
 
-    content = await asyncio.to_thread(
-        path.read_text,
-        encoding="utf-8",
-    )
+    try:
+        content = await asyncio.to_thread(
+            path.read_text,
+            encoding="utf-8",
+        )
+    except (UnicodeDecodeError, OSError) as exc:
+        return f"Could not read file for patching: {exc}"
 
     occurrences = content.count(args.old_text)
 
@@ -170,11 +389,7 @@ async def patch_file(args: PatchFileArgs) -> str:
             "Provide a more specific old_text."
         )
 
-    updated = content.replace(
-        args.old_text,
-        args.new_text,
-        1,
-    )
+    updated = content.replace(args.old_text, args.new_text, 1)
 
     await asyncio.to_thread(
         path.write_text,
@@ -222,6 +437,12 @@ class ExecuteCommandArgs(BaseModel):
 async def execute_command(args: ExecuteCommandArgs) -> str:
     validate_command(args.command)
 
+    # NOTE:
+    # cwd limits the command's starting directory only. It does NOT
+    # sandbox the process. For example, Python, Node, Git, npm, curl,
+    # and many other allowed programs can access or modify paths outside
+    # WORKSPACE. Use OS-level sandboxing / a restricted helper process
+    # before treating external system paths as technically read-only.
     process = await asyncio.create_subprocess_exec(
         *args.command,
         cwd=WORKSPACE,
@@ -290,6 +511,7 @@ class ProcessManager:
     async def start(self, command: list[str]) -> str:
         validate_command(command)
 
+        # Same security caveat as execute_command: cwd is not a sandbox.
         process = await asyncio.create_subprocess_exec(
             *command,
             cwd=WORKSPACE,
@@ -368,9 +590,7 @@ async def process_manage(args: ProcessManageArgs) -> str:
         if not args.command:
             return "A command is required to start a process."
 
-        process_id = await process_manager.start(
-            args.command
-        )
+        process_id = await process_manager.start(args.command)
 
         return f"Process started. ID: {process_id}"
 
@@ -423,42 +643,66 @@ def get_system_tools() -> list[FunctionTool]:
     return [
         create_tool(
             "read_file",
-            "Read a text file inside the ORBIT workspace.",
+            (
+                "Read a UTF-8 text file from the ORBIT workspace or an "
+                "explicitly configured read-only directory. External "
+                "directories are read-only."
+            ),
             ReadFileArgs,
             read_file,
         ),
 
         create_tool(
             "write_file",
-            "Create or overwrite a file inside the ORBIT workspace.",
+            "Create or overwrite a file inside the ORBIT workspace only.",
             WriteFileArgs,
             write_file,
         ),
 
         create_tool(
             "search_files",
-            "Search file contents inside the ORBIT workspace.",
+            (
+                "Search file contents inside the ORBIT workspace and "
+                "configured read-only directories."
+            ),
             SearchFilesArgs,
             search_files,
         ),
 
         create_tool(
+            "list_directory",
+            (
+                "List files and directories inside the ORBIT workspace "
+                "or configured read-only directories."
+            ),
+            ListDirectoryArgs,
+            list_directory,
+        ),
+
+        create_tool(
             "patch_file",
-            "Replace one exact occurrence of text in a workspace file.",
+            "Replace one exact occurrence of text in a workspace file. External files cannot be patched.",
             PatchFileArgs,
             patch_file,
         ),
 
         create_tool(
             "execute_command",
-            "Execute an allowed command in the ORBIT workspace.",
+            (
+                "Execute an allowlisted command with the ORBIT workspace "
+                "as its working directory. This is not an OS sandbox; "
+                "commands may access files outside the workspace."
+            ),
             ExecuteCommandArgs,
             execute_command,
         ),
 
         create_tool(
             "process_manage",
-            "Start, inspect or terminate background processes.",
+            (
+                "Start, inspect or terminate background processes. "
+                "Started processes are not filesystem-sandboxed."
+            ),
             ProcessManageArgs,
             process_manage,
         ),
