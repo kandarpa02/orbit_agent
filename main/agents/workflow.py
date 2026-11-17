@@ -9,7 +9,7 @@ from openai import AsyncOpenAI
 from openai.types.responses import ResponseTextDeltaEvent
 
 from .storage import InMemoryStore, StorageProvider
-from ..tools.system import get_system_tools
+from ..tools.tools_registry import get_system_tools, get_web_tools
 from ..prompts.base import load_agent_instructions
 
 set_tracing_disabled(True)
@@ -45,7 +45,7 @@ class OrbitClient:
             "Orbit",
             model=chat_model,
             instructions=load_agent_instructions(),
-            tools=get_system_tools()
+            tools=[*get_system_tools(), *get_web_tools()]
         )
 
     async def chat(
