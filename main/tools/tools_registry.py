@@ -1,5 +1,5 @@
 from __future__ import annotations
-
+import json
 from pydantic import BaseModel
 from agents import FunctionTool
 from typing import Any
@@ -13,20 +13,20 @@ from .system import (
     PatchFileArgs, patch_file, 
     ProcessManageArgs, process_manage)
 
+
 def create_tool(
     name: str,
     description: str,
     schema: type[BaseModel],
     handler,
+    output_schema=None,
 ) -> FunctionTool:
 
     async def invoke(ctx: Any, raw_arguments: str) -> str:
-        try:
-            args = schema.model_validate_json(raw_arguments)
-            return await handler(args)
+        args = schema.model_validate_json(raw_arguments)
+        result = await handler(args)
 
-        except Exception as exc:
-            return f"Tool error: {type(exc).__name__}: {exc}"
+        return json.dumps(result)
 
     return FunctionTool(
         name=name,
@@ -34,6 +34,7 @@ def create_tool(
         params_json_schema=schema.model_json_schema(),
         on_invoke_tool=invoke,
         strict_json_schema=False,
+        output_json_schema=output_schema
     )
 
 

@@ -1,11 +1,13 @@
 from pathlib import Path
 
+from skills.base import format_skill_catalog
+
 INSTRUCTIONS_DIR = Path("main/prompts")
 
 def load_agent_instructions() -> str:
     files = [
         "SOUL.md",
-        "AGENTS.md",
+        "AGENT.md",
         "TOOLS.md",
     ]
 
@@ -19,5 +21,12 @@ def load_agent_instructions() -> str:
             sections.append(
                 f"# {filename}\n\n{content}"
             )
+
+    sections.append(
+        "# Available Skills\n\n"
+        "Load a skill only when its description is relevant to the user's task. "
+        "The full instructions are available through the `load_skill` tool.\n\n"
+        + format_skill_catalog()
+    )
 
     return "\n\n".join(sections)
