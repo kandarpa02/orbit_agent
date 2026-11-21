@@ -4,7 +4,8 @@ from pathlib import Path
 SKILLS_DIR = Path(__file__).resolve().parent
 
 SKILL_DICT = {
-    "web-search": SKILLS_DIR / "web_search" / "WEB_SEARCH.md"
+    "web-search": SKILLS_DIR / "web_search" / "WEB_SEARCH.md",
+    "media-download": SKILLS_DIR / "media_download" / "MEDIA_DOWNLOAD.md",
 }
 
 _FRONTMATTER_PATTERN = re.compile(r"\A---\s*\n(.*?)\n---(?:\s*\n|\Z)", re.DOTALL)

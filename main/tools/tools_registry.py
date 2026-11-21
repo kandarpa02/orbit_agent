@@ -7,11 +7,14 @@ from typing import Any
 from .system import (
     ReadFileArgs, read_file, 
     WriteFileArgs, write_file, 
+    DeleteFileArgs, delete_file,
+    DeleteDirectoryArgs, delete_directory,
     SearchFilesArgs, search_files,
     ListDirectoryArgs, list_directory, 
     ExecuteCommandArgs, execute_command, 
     PatchFileArgs, patch_file, 
     ProcessManageArgs, process_manage)
+from .python_task import PythonTaskArgs, run_python_task
 
 
 def create_tool(
@@ -60,10 +63,38 @@ def get_system_tools() -> list[FunctionTool]:
         ),
 
         create_tool(
+            "delete_file",
+            (
+                "Delete one file inside the ORBIT workspace. The path may be "
+                "workspace-relative or absolute, but absolute paths outside "
+                "the workspace are rejected. Directories cannot be deleted. "
+                "Use this instead of execute_command for file deletion."
+            ),
+            DeleteFileArgs,
+            delete_file,
+        ),
+
+        create_tool(
+            "delete_directory",
+            (
+                "Recursively delete one explicitly requested directory and "
+                "its contents inside the ORBIT workspace. Accepts a "
+                "workspace-relative or absolute path; paths outside the "
+                "workspace, the workspace root itself, and symbolic links "
+                "are rejected. On Windows, read-only files are made writable "
+                "before retrying deletion. Use instead of deleting contents "
+                "individually or calling shell commands."
+            ),
+            DeleteDirectoryArgs,
+            delete_directory,
+        ),
+
+        create_tool(
             "search_files",
             (
                 "Search file contents inside the ORBIT workspace and "
-                "configured read-only directories."
+                "configured read-only directories. This searches contents, "
+                "not filenames."
             ),
             SearchFilesArgs,
             search_files,
@@ -91,10 +122,35 @@ def get_system_tools() -> list[FunctionTool]:
             (
                 "Execute an allowlisted command with the ORBIT workspace "
                 "as its working directory. This is not an OS sandbox; "
-                "commands may access files outside the workspace."
+                "commands may access files outside the workspace. This runs "
+                "an executable directly, not through a shell; the executable "
+                "must exist on the host. The command argument must be an "
+                "array of argv strings, such as ['ls', '-la', 'python_tasks'], "
+                "not one shell-command string. Use delete_file for workspace "
+                "file deletion."
             ),
             ExecuteCommandArgs,
             execute_command,
+        ),
+
+        create_tool(
+            "run_python_task",
+            (
+                "Run a Python script in a temporary per-task virtual "
+                "environment using ORBIT's host Python. Packages installed "
+                "during the task are temporary. The script can read and write "
+                "files permitted to the ORBIT process and has network access; "
+                "this is not an OS sandbox. ORBIT environment variables are "
+                "not passed to the script. Its working directory is the "
+                "persistent ORBIT workspace's python_tasks directory; use "
+                "relative filenames there without a python_tasks/ prefix. "
+                "File tools resolve relative paths from the main workspace, "
+                "so use python_tasks/<filename> with them. Use for external "
+                "tasks not covered by a dedicated tool, such as downloading "
+                "accessible media."
+            ),
+            PythonTaskArgs,
+            run_python_task,
         ),
 
         create_tool(

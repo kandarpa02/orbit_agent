@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import os
+import shutil
+import stat
 import uuid
 
 from dataclasses import dataclass
@@ -238,6 +240,14 @@ class WriteFileArgs(BaseModel):
     content: str
 
 
+class DeleteFileArgs(BaseModel):
+    path: str
+
+
+class DeleteDirectoryArgs(BaseModel):
+    path: str
+
+
 class SearchFilesArgs(BaseModel):
     query: str
     pattern: str = "**/*"
@@ -290,6 +300,79 @@ async def write_file(args: WriteFileArgs) -> str:
     )
 
     return f"Successfully wrote {path.relative_to(WORKSPACE)}"
+
+
+async def delete_file(args: DeleteFileArgs) -> str:
+    path = resolve_path(args.path, operation="write")
+    candidate = Path(args.path).expanduser()
+    if not candidate.is_absolute():
+        candidate = WORKSPACE / candidate
+
+    if not candidate.exists() and not candidate.is_symlink():
+        return (
+            f"File not found: {args.path}. Check the exact filename with "
+            "list_directory, then retry delete_file; do not use "
+            "execute_command for deletion."
+        )
+
+    if candidate.is_dir():
+        return "Cannot delete a directory with delete_file."
+
+    try:
+        await asyncio.to_thread(candidate.unlink)
+    except OSError as exc:
+        return f"Could not delete file: {exc}"
+
+    return f"Deleted file: {path}"
+
+
+def _retry_readonly_delete(function, path, exc_info) -> None:
+    error = exc_info[1]
+    if os.name != "nt" or not isinstance(error, PermissionError):
+        raise error
+
+    try:
+        os.chmod(path, stat.S_IWRITE)
+        function(path)
+    except OSError:
+        raise error
+
+
+async def delete_directory(args: DeleteDirectoryArgs) -> str:
+    candidate = Path(args.path).expanduser()
+    if not candidate.is_absolute():
+        candidate = WORKSPACE / candidate
+
+    if candidate.is_symlink():
+        return "Refusing to recursively delete a symbolic link."
+
+    path = resolve_path(args.path, operation="write")
+    if path == WORKSPACE.resolve():
+        return "Refusing to delete the ORBIT workspace root."
+
+    if not candidate.exists():
+        return f"Directory not found: {args.path}"
+
+    if not candidate.is_dir():
+        return f"Not a directory: {args.path}"
+
+    try:
+        await asyncio.to_thread(
+            shutil.rmtree,
+            candidate,
+            onerror=_retry_readonly_delete,
+        )
+    except PermissionError as exc:
+        blocked_path = exc.filename or str(path)
+        return (
+            f"Access denied while deleting {blocked_path}. The directory may "
+            "be partially deleted; a file may still be open or otherwise "
+            "locked. Close programs using it, then retry delete_directory."
+        )
+    except OSError as exc:
+        return f"Could not delete directory (it may be partially deleted): {exc}"
+
+    return f"Deleted directory and its contents: {path}"
 
 
 async def search_files(args: SearchFilesArgs) -> str:
